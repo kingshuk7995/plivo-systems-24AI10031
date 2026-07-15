@@ -57,7 +57,8 @@ func main() {
 	redFrame := make([]byte, common.FrameBytes)
 
 	highestSeq := uint32(0)
-	lastNack := make(map[uint32]time.Time)
+	var lastNack [common.HistoryRingSize]time.Time
+	var lastNackEval time.Time
 
 	for {
 		n, _, err := inConn.ReadFromUDP(buf)
@@ -70,11 +71,13 @@ func main() {
 			highestSeq = seq
 		}
 
+		// Extract primary frame
 		if !alreadySent(seq) {
 			outConn.Write(buf[0:common.FrameBytes])
 			markSent(seq)
 		}
 
+		// Extract redundant payload
 		var k uint32 = common.RedundancyOffset
 		if n >= common.PacketBytes {
 			if seq >= k {
@@ -89,19 +92,22 @@ func main() {
 			}
 		}
 
-		if highestSeq >= k+2 {
+		now := time.Now()
+		if highestSeq >= k+2 && now.Sub(lastNackEval) > 10*time.Millisecond {
+			lastNackEval = now
 			start := uint32(0)
 			if highestSeq > 100 {
 				start = highestSeq - 100
 			}
-			now := time.Now()
 			for m := start; m <= highestSeq-k-2; m++ {
 				if !alreadySent(m) {
-					if now.Sub(lastNack[m]) > 80*time.Millisecond {
+					idx := m % common.HistoryRingSize
+					// Don't send NACKs too frequently for the same frame
+					if now.Sub(lastNack[idx]) > 80*time.Millisecond {
 						nackBuf := make([]byte, 4)
 						binary.BigEndian.PutUint32(nackBuf, m)
 						feedbackConn.Write(nackBuf)
-						lastNack[m] = now
+						lastNack[idx] = now
 					}
 				}
 			}

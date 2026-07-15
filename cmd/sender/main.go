@@ -9,7 +9,7 @@ import (
 
 type HarnessFrame struct {
 	Seq     uint32
-	Payload []byte
+	Payload [common.PayloadBytes]byte
 }
 
 func main() {
@@ -43,7 +43,6 @@ func main() {
 	}
 	defer nackConn.Close()
 
-	// Use a ring buffer instead of a map to prevent GC churn
 	var history [common.HistoryRingSize][]byte
 	for i := 0; i < common.HistoryRingSize; i++ {
 		history[i] = make([]byte, common.PayloadBytes)
@@ -58,12 +57,10 @@ func main() {
 		for {
 			n, _, err := inConn.ReadFromUDP(buf)
 			if err == nil && n >= common.FrameBytes {
-				payload := make([]byte, common.PayloadBytes)
-				copy(payload, buf[common.SeqBytes:common.FrameBytes])
-				harnessChan <- HarnessFrame{
-					Seq:     binary.BigEndian.Uint32(buf[:common.SeqBytes]),
-					Payload: payload,
-				}
+				var frame HarnessFrame
+				frame.Seq = binary.BigEndian.Uint32(buf[:common.SeqBytes])
+				copy(frame.Payload[:], buf[common.SeqBytes:common.FrameBytes])
+				harnessChan <- frame
 			}
 		}
 	}()
@@ -90,10 +87,10 @@ func main() {
 				highestSeqSeen = frame.Seq
 			}
 			idx := frame.Seq % common.HistoryRingSize
-			copy(history[idx], frame.Payload)
+			copy(history[idx], frame.Payload[:])
 
 			binary.BigEndian.PutUint32(outBuf[0:4], frame.Seq)
-			copy(outBuf[4:common.FrameBytes], frame.Payload)
+			copy(outBuf[4:common.FrameBytes], frame.Payload[:])
 
 			totalRaw += common.PayloadBytes
 			haveRedundant := frame.Seq >= k
@@ -101,8 +98,6 @@ func main() {
 			withoutRedundantLen := uint64(common.FrameBytes)
 
 			packetLen := int(withoutRedundantLen)
-			// Target full 2.00x limit. NACKs and retransmissions will increment totalUsed,
-			// organically forcing FEC to skip only when bandwidth is actually stolen by ARQ.
 			marginMax := totalRaw * 2
 			if haveRedundant && (totalUsed+withRedundantLen) <= marginMax {
 				target := frame.Seq - k
