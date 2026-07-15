@@ -4,10 +4,16 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"transport/internal/common"
 )
 
+type HarnessFrame struct {
+	Seq     uint32
+	Payload []byte
+}
+
 func main() {
-	harnessAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:47010")
+	harnessAddr, err := net.ResolveUDPAddr("udp", common.PortHarnessSource)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -17,7 +23,7 @@ func main() {
 	}
 	defer inConn.Close()
 
-	relayAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:47001")
+	relayAddr, err := net.ResolveUDPAddr("udp", common.PortRelayUplink)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -27,51 +33,98 @@ func main() {
 	}
 	defer outConn.Close()
 
-	// Use a ring buffer instead of a map to prevent GC churn
-	const ringSize = 256
-	var history [ringSize][]byte
-	for i := 0; i < ringSize; i++ {
-		history[i] = make([]byte, 160)
+	nackAddr, err := net.ResolveUDPAddr("udp", common.PortRelayFeedbackOut)
+	if err != nil {
+		log.Fatal(err)
 	}
+	nackConn, err := net.ListenUDP("udp", nackAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer nackConn.Close()
 
-	buf := make([]byte, 2048)
-	outBuf := make([]byte, 324)
-	
-	var totalRaw, totalUp uint64
+	// Use a ring buffer instead of a map to prevent GC churn
+	var history [common.HistoryRingSize][]byte
+	for i := 0; i < common.HistoryRingSize; i++ {
+		history[i] = make([]byte, common.PayloadBytes)
+	}
+	var highestSeqSeen uint32 = 0
+
+	harnessChan := make(chan HarnessFrame, 200)
+	nackChan := make(chan uint32, 200)
+
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, _, err := inConn.ReadFromUDP(buf)
+			if err == nil && n >= common.FrameBytes {
+				payload := make([]byte, common.PayloadBytes)
+				copy(payload, buf[common.SeqBytes:common.FrameBytes])
+				harnessChan <- HarnessFrame{
+					Seq:     binary.BigEndian.Uint32(buf[:common.SeqBytes]),
+					Payload: payload,
+				}
+			}
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4)
+		for {
+			n, _, err := nackConn.ReadFromUDP(buf)
+			if err == nil && n == 4 {
+				seq := binary.BigEndian.Uint32(buf)
+				nackChan <- seq
+			}
+		}
+	}()
+
+	outBuf := make([]byte, common.PacketBytes)
+	var totalRaw, totalUsed uint64
+	var k uint32 = common.RedundancyOffset
 
 	for {
-		n, _, err := inConn.ReadFromUDP(buf)
-		if err != nil || n < 164 {
-			continue
+		select {
+		case frame := <-harnessChan:
+			if frame.Seq > highestSeqSeen {
+				highestSeqSeen = frame.Seq
+			}
+			idx := frame.Seq % common.HistoryRingSize
+			copy(history[idx], frame.Payload)
+
+			binary.BigEndian.PutUint32(outBuf[0:4], frame.Seq)
+			copy(outBuf[4:common.FrameBytes], frame.Payload)
+
+			totalRaw += common.PayloadBytes
+			haveRedundant := frame.Seq >= k
+			withRedundantLen := uint64(common.PacketBytes)
+			withoutRedundantLen := uint64(common.FrameBytes)
+
+			packetLen := int(withoutRedundantLen)
+			marginMax := (totalRaw * 190) / 100
+			if haveRedundant && (totalUsed+withRedundantLen) <= marginMax {
+				target := frame.Seq - k
+				targetIdx := target % common.HistoryRingSize
+				copy(outBuf[common.FrameBytes:common.PacketBytes], history[targetIdx])
+				packetLen = int(withRedundantLen)
+				totalUsed += withRedundantLen
+			} else {
+				totalUsed += withoutRedundantLen
+			}
+
+			outConn.Write(outBuf[:packetLen])
+
+		case nackSeq := <-nackChan:
+			if highestSeqSeen >= nackSeq && (highestSeqSeen-nackSeq) < common.HistoryRingSize {
+				retransBuf := make([]byte, common.FrameBytes)
+				binary.BigEndian.PutUint32(retransBuf[0:4], nackSeq)
+
+				idx := nackSeq % common.HistoryRingSize
+				copy(retransBuf[4:], history[idx])
+
+				totalUsed += 168
+				outConn.Write(retransBuf)
+			}
 		}
-
-		seq := binary.BigEndian.Uint32(buf[:4])
-
-		idx := seq % ringSize
-		copy(history[idx], buf[4:164])
-
-		copy(outBuf[0:164], buf[:164])
-
-		var k uint32 = 3
-
-		// 2. Append redundant payload using a running bandwidth budget.
-		// Maximum allowed overhead is 2.00x of raw payloads (n * 160).
-		totalRaw += 160
-		haveRedundant := seq >= k
-		withRedundantLen := uint64(324)
-		withoutRedundantLen := uint64(164)
-		
-		packetLen := int(withoutRedundantLen)
-		if haveRedundant && (totalUp + withRedundantLen) <= 2 * totalRaw {
-			target := seq - k
-			targetIdx := target % ringSize
-			copy(outBuf[164:324], history[targetIdx])
-			packetLen = int(withRedundantLen)
-			totalUp += withRedundantLen
-		} else {
-			totalUp += withoutRedundantLen
-		}
-
-		outConn.Write(outBuf[:packetLen])
 	}
 }

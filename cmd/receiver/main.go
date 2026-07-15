@@ -4,26 +4,26 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"time"
+	"transport/internal/common"
 )
 
-const winSize = 256
-
-var sent [winSize]uint32
-var sentValid [winSize]bool
+var sent [common.HistoryRingSize]uint32
+var sentValid [common.HistoryRingSize]bool
 
 func alreadySent(seq uint32) bool {
-	idx := seq % winSize
+	idx := seq % common.HistoryRingSize
 	return sentValid[idx] && sent[idx] == seq
 }
 
 func markSent(seq uint32) {
-	idx := seq % winSize
+	idx := seq % common.HistoryRingSize
 	sent[idx] = seq
 	sentValid[idx] = true
 }
 
 func main() {
-	inAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:47002")
+	inAddr, err := net.ResolveUDPAddr("udp", common.PortRelayDownlink)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func main() {
 	}
 	defer inConn.Close()
 
-	playerAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:47020")
+	playerAddr, err := net.ResolveUDPAddr("udp", common.PortHarnessPlayer)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,32 +43,66 @@ func main() {
 	}
 	defer outConn.Close()
 
+	feedbackAddr, err := net.ResolveUDPAddr("udp", common.PortRelayFeedbackIn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	feedbackConn, err := net.DialUDP("udp", nil, feedbackAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer feedbackConn.Close()
+
 	buf := make([]byte, 2048)
-	redFrame := make([]byte, 164)
+	redFrame := make([]byte, common.FrameBytes)
+
+	highestSeq := uint32(0)
+	lastNack := make(map[uint32]time.Time)
 
 	for {
 		n, _, err := inConn.ReadFromUDP(buf)
-		if err != nil || n < 164 {
+		if err != nil || n < common.FrameBytes {
 			continue
 		}
 
-		seq := binary.BigEndian.Uint32(buf[0:4])
+		seq := binary.BigEndian.Uint32(buf[0:common.SeqBytes])
+		if seq > highestSeq {
+			highestSeq = seq
+		}
+
 		if !alreadySent(seq) {
-			outConn.Write(buf[0:164])
+			outConn.Write(buf[0:common.FrameBytes])
 			markSent(seq)
 		}
 
-		if n >= 324 {
-			var k uint32 = 3
-
+		var k uint32 = common.RedundancyOffset
+		if n >= common.PacketBytes {
 			if seq >= k {
 				redSeq := seq - k
 				if !alreadySent(redSeq) {
-					binary.BigEndian.PutUint32(redFrame[0:4], redSeq)
-					copy(redFrame[4:164], buf[164:324])
+					binary.BigEndian.PutUint32(redFrame[0:common.SeqBytes], redSeq)
+					copy(redFrame[common.SeqBytes:common.FrameBytes], buf[common.FrameBytes:common.PacketBytes])
 
 					outConn.Write(redFrame)
 					markSent(redSeq)
+				}
+			}
+		}
+
+		if highestSeq >= k+2 {
+			start := uint32(0)
+			if highestSeq > 100 {
+				start = highestSeq - 100
+			}
+			now := time.Now()
+			for m := start; m <= highestSeq-k-2; m++ {
+				if !alreadySent(m) {
+					if now.Sub(lastNack[m]) > 80*time.Millisecond {
+						nackBuf := make([]byte, 4)
+						binary.BigEndian.PutUint32(nackBuf, m)
+						feedbackConn.Write(nackBuf)
+						lastNack[m] = now
+					}
 				}
 			}
 		}

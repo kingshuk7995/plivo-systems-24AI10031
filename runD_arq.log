@@ -1,0 +1,8 @@
+endpoints done
+relay done: {'up_bytes': 455504, 'down_bytes': 424, 'up_pkts': 1596, 'down_pkts': 106, 'dropped': 130, 'duplicated': 13}
+================ SCORE ================
+  frames               : 1500
+  deadline misses      : 11  (0.73%)   [cap 1.00%]
+  playout delay        : 300 ms   <-- your score if valid; lower wins
+  bandwidth overhead   : 1.90x   [cap 2.00x]   (up 455504B, feedback 424B)
+  RESULT               : VALID
