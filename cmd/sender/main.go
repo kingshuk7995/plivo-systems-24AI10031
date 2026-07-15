@@ -101,7 +101,9 @@ func main() {
 			withoutRedundantLen := uint64(common.FrameBytes)
 
 			packetLen := int(withoutRedundantLen)
-			marginMax := (totalRaw * 190) / 100
+			// Target full 2.00x limit. NACKs and retransmissions will increment totalUsed,
+			// organically forcing FEC to skip only when bandwidth is actually stolen by ARQ.
+			marginMax := totalRaw * 2
 			if haveRedundant && (totalUsed+withRedundantLen) <= marginMax {
 				target := frame.Seq - k
 				targetIdx := target % common.HistoryRingSize
