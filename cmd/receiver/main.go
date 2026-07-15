@@ -6,6 +6,22 @@ import (
 	"net"
 )
 
+const winSize = 256
+
+var sent [winSize]uint32
+var sentValid [winSize]bool
+
+func alreadySent(seq uint32) bool {
+	idx := seq % winSize
+	return sentValid[idx] && sent[idx] == seq
+}
+
+func markSent(seq uint32) {
+	idx := seq % winSize
+	sent[idx] = seq
+	sentValid[idx] = true
+}
+
 func main() {
 	inAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:47002")
 	if err != nil {
@@ -28,7 +44,7 @@ func main() {
 	defer outConn.Close()
 
 	buf := make([]byte, 2048)
-	const k = 1
+	redFrame := make([]byte, 164)
 
 	for {
 		n, _, err := inConn.ReadFromUDP(buf)
@@ -37,16 +53,24 @@ func main() {
 		}
 
 		seq := binary.BigEndian.Uint32(buf[0:4])
-		outConn.Write(buf[0:164])
+		if !alreadySent(seq) {
+			outConn.Write(buf[0:164])
+			markSent(seq)
+		}
 
 		if n >= 324 {
-			redSeq := seq - k
+			var k uint32 = 3
 
-			redFrame := make([]byte, 164)
-			binary.BigEndian.PutUint32(redFrame[0:4], redSeq)
-			copy(redFrame[4:], buf[164:324])
+			if seq >= k {
+				redSeq := seq - k
+				if !alreadySent(redSeq) {
+					binary.BigEndian.PutUint32(redFrame[0:4], redSeq)
+					copy(redFrame[4:164], buf[164:324])
 
-			outConn.Write(redFrame)
+					outConn.Write(redFrame)
+					markSent(redSeq)
+				}
+			}
 		}
 	}
 }

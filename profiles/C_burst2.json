@@ -1,0 +1,11 @@
+{
+    "name": "C_burst2",
+    "burst_loss": {
+        "p_enter": 0.02,
+        "p_exit": 0.5,
+        "p_loss_in_burst": 1.0
+    },
+    "delay_min_ms": 10,
+    "delay_max_ms": 40,
+    "dup": 0.01
+}

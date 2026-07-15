@@ -1,0 +1,9 @@
+endpoints done
+relay done: {'up_bytes': 479920, 'down_bytes': 0, 'up_pkts': 1500, 'down_pkts': 0, 'dropped': 107, 'duplicated': 13}
+================ SCORE ================
+  frames               : 1500
+  deadline misses      : 60  (4.00%)   [cap 1.00%]
+  playout delay        : 140 ms   <-- your score if valid; lower wins
+  bandwidth overhead   : 2.00x   [cap 2.00x]   (up 479920B, feedback 0B)
+  RESULT               : INVALID
+  (reduce misses under 1% and overhead under 2x, THEN minimize delay)

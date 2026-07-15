@@ -27,37 +27,51 @@ func main() {
 	}
 	defer outConn.Close()
 
-	const k = 1
-	history := make(map[uint32][]byte)
+	// Use a ring buffer instead of a map to prevent GC churn
+	const ringSize = 256
+	var history [ringSize][]byte
+	for i := 0; i < ringSize; i++ {
+		history[i] = make([]byte, 160)
+	}
 
 	buf := make([]byte, 2048)
+	outBuf := make([]byte, 324)
+	
+	var totalRaw, totalUp uint64
+
 	for {
 		n, _, err := inConn.ReadFromUDP(buf)
-		if err != nil || n < 4 {
+		if err != nil || n < 164 {
 			continue
 		}
 
 		seq := binary.BigEndian.Uint32(buf[:4])
 
-		payload := make([]byte, n-4)
-		copy(payload, buf[4:n])
-		history[seq] = payload
+		idx := seq % ringSize
+		copy(history[idx], buf[4:164])
 
-		if seq >= k+10 {
-			delete(history, seq-(k+10))
-		}
+		copy(outBuf[0:164], buf[:164])
 
-		outBuf := make([]byte, 0, 324)
+		var k uint32 = 3
 
-		outBuf = append(outBuf, buf[:n]...)
-
-		if seq%20 != 0 && seq >= k {
+		// 2. Append redundant payload using a running bandwidth budget.
+		// Maximum allowed overhead is 2.00x of raw payloads (n * 160).
+		totalRaw += 160
+		haveRedundant := seq >= k
+		withRedundantLen := uint64(324)
+		withoutRedundantLen := uint64(164)
+		
+		packetLen := int(withoutRedundantLen)
+		if haveRedundant && (totalUp + withRedundantLen) <= 2 * totalRaw {
 			target := seq - k
-			if red, ok := history[target]; ok {
-				outBuf = append(outBuf, red...)
-			}
+			targetIdx := target % ringSize
+			copy(outBuf[164:324], history[targetIdx])
+			packetLen = int(withRedundantLen)
+			totalUp += withRedundantLen
+		} else {
+			totalUp += withoutRedundantLen
 		}
 
-		outConn.Write(outBuf)
+		outConn.Write(outBuf[:packetLen])
 	}
 }
