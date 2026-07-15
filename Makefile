@@ -1,13 +1,11 @@
-CC ?= cc
-CFLAGS ?= -O2 -Wall
-
 all: sender receiver
 
-sender: sender.c
-	$(CC) $(CFLAGS) -o sender sender.c
+sender: cmd/sender/main.go
+	go build -o sender ./cmd/sender
 
-receiver: receiver.c
-	$(CC) $(CFLAGS) -o receiver receiver.c
+receiver: cmd/receiver/main.go
+	go build -o receiver ./cmd/receiver
 
 clean:
+	rm -rf __pycache__
 	rm -f sender receiver
